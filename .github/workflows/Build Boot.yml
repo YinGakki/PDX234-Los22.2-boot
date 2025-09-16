@@ -1,0 +1,189 @@
+name: Build Boot Image (Split Jobs)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: '内核源码分支'
+        required: true
+        default: 'lineage-22.2'
+        type: string
+      device_codename:
+        description: '设备代号（如 pdx234）'
+        required: true
+        default: 'pdx234'
+        type: string
+
+jobs:
+  # --------------------------
+  # Job 1：依赖准备与缓存（仅下载+缓存，不编译）
+  # --------------------------
+  prepare-dependencies:
+    runs-on: ubuntu-22.04
+    # 输出参数：传递设备代号、内核分支给编译Job
+    outputs:
+      device_codename: ${{ github.event.inputs.device_codename || 'pdx234' }}
+      kernel_branch: ${{ github.event.inputs.kernel_branch || 'lineage-22.2' }}
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+
+      - name: Install download dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git git-lfs wget curl lz4  # 仅保留下载所需工具
+
+      # 1. 缓存内核源码
+      - name: Cache kernel source
+        id: cache-kernel
+        uses: actions/cache@v3
+        with:
+          path: ./kernel
+          key: kernel-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.device_codename }}-${{ runner.os }}
+          restore-keys: |
+            kernel-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.device_codename }}-
+
+      - name: Clone kernel source (if not cached)
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: |
+          KERNEL_REPO="https://github.com/LineageOS/android_kernel_sony_sm8550.git"
+          KERNEL_BRANCH="${{ github.event.inputs.kernel_branch || 'lineage-22.2' }}"
+          git clone $KERNEL_REPO kernel
+          cd kernel && git checkout $KERNEL_BRANCH && git rev-parse HEAD > ../kernel_commit.txt
+
+      # 2. 缓存设备树
+      - name: Cache device trees
+        id: cache-device
+        uses: actions/cache@v3
+        with:
+          path: |
+            ./device/sony/${{ github.event.inputs.device_codename || 'pdx234' }}
+            ./device/sony/sm8550-common
+          key: device-${{ github.event.inputs.device_codename }}-${{ github.event.inputs.kernel_branch }}-${{ runner.os }}
+          restore-keys: |
+            device-${{ github.event.inputs.device_codename }}-
+
+      - name: Clone device trees (if not cached)
+        if: steps.cache-device.outputs.cache-hit != 'true'
+        run: |
+          DEVICE_CODENAME="${{ github.event.inputs.device_codename || 'pdx234' }}"
+          KERNEL_BRANCH="${{ github.event.inputs.kernel_branch || 'lineage-22.2' }}"
+          mkdir -p device/sony
+          git clone https://github.com/LineageOS/android_device_sony_${DEVICE_CODENAME}.git device/sony/${DEVICE_CODENAME}
+          git clone https://github.com/LineageOS/android_device_sony_sm8550-common.git device/sony/sm8550-common
+          cd device/sony/${DEVICE_CODENAME} && git checkout $KERNEL_BRANCH && cd ../../..
+          cd device/sony/sm8550-common && git checkout $KERNEL_BRANCH && cd ../../..
+
+      # 3. 缓存 Clang 工具链
+      - name: Cache Clang toolchain
+        id: cache-clang
+        uses: actions/cache@v3
+        with:
+          path: ./clang-r498229b
+          key: clang-r498229b-${{ runner.os }}
+          restore-keys: |
+            clang-r498229b-
+
+      - name: Download Clang (if not cached)
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-14.0.0_r35/clang-r498229b.tar.gz
+          mkdir -p clang-r498229b && tar -zxf clang-r498229b.tar.gz -C clang-r498229b && rm -f *.tar.gz
+
+  # --------------------------
+  # Job 2：内核编译与 boot.img 生成
+  # --------------------------
+  compile-bootimg:
+    runs-on: ubuntu-22.04
+    needs: prepare-dependencies  # 依赖「准备Job」成功完成
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache flex g++-multilib gcc-multilib lib32ncurses5-dev lib32readline-dev lib32z1-dev libelf-dev liblz4-tool libncurses5-dev libssl-dev lzop rsync zip zlib1g-dev
+
+      # 恢复内核源码缓存
+      - name: Restore kernel source cache
+        uses: actions/cache@v3
+        with:
+          path: ./kernel
+          key: kernel-${{ needs.prepare-dependencies.outputs.kernel_branch }}-${{ needs.prepare-dependencies.outputs.device_codename }}-${{ runner.os }}
+
+      # 恢复设备树缓存
+      - name: Restore device trees cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ./device/sony/${{ needs.prepare-dependencies.outputs.device_codename }}
+            ./device/sony/sm8550-common
+          key: device-${{ needs.prepare-dependencies.outputs.device_codename }}-${{ needs.prepare-dependencies.outputs.kernel_branch }}-${{ runner.os }}
+
+      # 恢复 Clang 工具链并添加到PATH
+      - name: Restore Clang toolchain cache
+        uses: actions/cache@v3
+        with:
+          path: ./clang-r498229b
+          key: clang-r498229b-${{ runner.os }}
+
+      - name: Add Clang to PATH
+        run: echo "PATH=$(pwd)/clang-r498229b/bin:$PATH" >> $GITHUB_ENV
+
+      # 编译内核
+      - name: Build kernel
+        run: |
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+          export CC=clang
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+          make O=out ${{ needs.prepare-dependencies.outputs.device_codename }}_defconfig
+          make O=out -j$(nproc)
+
+      # 生成 ramdisk（修复原命令语法错误）
+      - name: Prepare ramdisk
+        run: |
+          DEVICE_CODENAME="${{ needs.prepare-dependencies.outputs.device_codename }}"
+          mkdir -p ramdisk
+          cp -r device/sony/${DEVICE_CODENAME}/ramdisk/* ramdisk/
+          cd ramdisk && find . | cpio -o -H newc | lz4 -l -12 -f - ../ramdisk.img && cd ..
+
+      # 打包 boot.img
+      - name: Build boot.img
+        run: |
+          DEVICE_CODENAME="${{ needs.prepare-dependencies.outputs.device_codename }}"
+          KERNEL_BRANCH="${{ needs.prepare-dependencies.outputs.kernel_branch }}"
+          wget https://github.com/osm0sis/mkbootimg/releases/latest/download/mkbootimg -O mkbootimg
+          chmod +x mkbootimg
+          ./mkbootimg \
+            --kernel kernel/out/arch/arm64/boot/Image.gz-dtb \
+            --ramdisk ramdisk.img \
+            --base 0x00000000 \
+            --cmdline "video=vfb:640x400,bpp=32,memsize=3072000 nosoftlockup" \
+            --bootconfig "androidboot.hardware=qcom androidboot.memcg=1 androidboot.usbcontroller=a600000.dwc3" \
+            --pagesize 4096 \
+            --ramdiskoffset 0x01000000 \
+            --tagsoffset 0x00000100 \
+            --headerversion 4 \
+            --osversion 14 \
+            --ospatchlevel 2025-04 \
+            --output boot-${DEVICE_CODENAME}-${KERNEL_BRANCH}.img
+
+      # 上传产物
+      - name: Upload boot.img
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-image-${{ needs.prepare-dependencies.outputs.device_codename }}-${{ needs.prepare-dependencies.outputs.kernel_branch }}
+          path: boot-${{ needs.prepare-dependencies.outputs.device_codename }}-${{ needs.prepare-dependencies.outputs.kernel_branch }}.img
