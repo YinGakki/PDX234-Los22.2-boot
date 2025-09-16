@@ -6,6 +6,18 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+    # 可选：添加自定义参数，手动触发时可修改
+    inputs:
+      kernel_branch:
+        description: '内核源码分支'
+        required: true
+        default: 'lineage-22.2'
+        type: string
+      device_codename:
+        description: '设备代号（如 pdx234）'
+        required: true
+        default: 'pdx234'
+        type: string
 
 jobs:
   build:
