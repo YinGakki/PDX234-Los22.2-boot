@@ -98,19 +98,26 @@ jobs:
         run: echo "PATH=$(pwd)/clang-r498229b/bin:$PATH" >> $GITHUB_ENV
 
       - name: Build kernel
-        run: |
+       run: |
           cd kernel
-          # 设置编译参数（根据设备调整）
+          # 关键：明确指定架构和编译器，使用Clang而非GCC
           export ARCH=arm64
+          # 指定Clang前缀（无需单独的GCC工具链）
           export CROSS_COMPILE=aarch64-linux-android-
           export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+          # 强制使用Clang作为编译器
           export CC=clang
           export LD=ld.lld
-
-          # 加载设备配置（从设备树中获取的 defconfig）
-          make O=out vendor/sony/pdx234_defconfig  # 替换为你的设备配置
-
-          # 编译内核
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+          
+          # 加载设备配置（使用正确的defconfig路径）
+          make O=out ${{ github.event.inputs.device_codename }}_defconfig
+          
+          # 开始编译，增加-j参数加速
           make O=out -j$(nproc)
 
       - name: Prepare ramdisk
