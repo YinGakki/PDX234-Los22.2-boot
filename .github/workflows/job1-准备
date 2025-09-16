@@ -1,0 +1,93 @@
+name: Build Boot Image with Repo Caching
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: '内核源码分支'
+        required: true
+        default: 'lineage-22.2'
+        type: string
+      device_codename:
+        description: '设备代号（如 pdx234）'
+        required: true
+        default: 'pdx234'
+        type: string
+
+jobs:
+  cache-dependencies:
+    runs-on: ubuntu-22.04
+    outputs:
+      device_codename: ${{ github.event.inputs.device_codename || 'pdx234' }}
+      kernel_branch: ${{ github.event.inputs.kernel_branch || 'lineage-22.2' }}
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (基础工具)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git git-lfs wget curl zip unzip lz4
+
+      - name: Cache kernel source
+        id: cache-kernel
+        uses: actions/cache@v3
+        with:
+          path: ./kernel
+          key: kernel-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.device_codename }}-${{ runner.os }}
+          restore-keys: |
+            kernel-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.device_codename }}-
+
+      - name: Clone kernel source (if not cached)
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: |
+          KERNEL_REPO="https://github.com/LineageOS/android_kernel_sony_sm8550.git"
+          KERNEL_BRANCH="${{ github.event.inputs.kernel_branch || 'lineage-22.2' }}"
+          git clone $KERNEL_REPO kernel
+          cd kernel
+          git checkout $KERNEL_BRANCH
+          git rev-parse HEAD > ../kernel_commit.txt
+
+      - name: Cache device trees
+        id: cache-device
+        uses: actions/cache@v3
+        with:
+          path: |
+            ./device/sony/${{ github.event.inputs.device_codename || 'pdx234' }}
+            ./device/sony/sm8550-common
+          key: device-${{ github.event.inputs.device_codename }}-${{ github.event.inputs.kernel_branch }}-${{ runner.os }}
+          restore-keys: |
+            device-${{ github.event.inputs.device_codename }}-
+
+      - name: Clone device trees (if not cached)
+        if: steps.cache-device.outputs.cache-hit != 'true'
+        run: |
+          DEVICE_CODENAME="${{ github.event.inputs.device_codename || 'pdx234' }}"
+          KERNEL_BRANCH="${{ github.event.inputs.kernel_branch || 'lineage-22.2' }}"
+          mkdir -p device/sony
+          git clone https://github.com/LineageOS/android_device_sony_${DEVICE_CODENAME}.git device/sony/${DEVICE_CODENAME}
+          git clone https://github.com/LineageOS/android_device_sony_sm8550-common.git device/sony/sm8550-common
+          cd device/sony/${DEVICE_CODENAME} && git checkout $KERNEL_BRANCH && cd ../../..
+          cd device/sony/sm8550-common && git checkout $KERNEL_BRANCH && cd ../../..
+
+      - name: Cache Clang toolchain
+        id: cache-clang
+        uses: actions/cache@v3
+        with:
+          path: ./clang-r498229b
+          key: clang-r498229b-${{ runner.os }}
+          restore-keys: |
+            clang-r498229b-
+
+      - name: Download Clang (if not cached)
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-14.0.0_r35/clang-r498229b.tar.gz
+          mkdir -p clang-r498229b
+          tar -zxf clang-r498229b.tar.gz -C clang-r498229b
+          rm -f clang-r498229b.tar.gz
+
