@@ -98,7 +98,7 @@ jobs:
         run: echo "PATH=$(pwd)/clang-r498229b/bin:$PATH" >> $GITHUB_ENV
 
       - name: Build kernel
-       run: |
+        run: |
           cd kernel
           # 关键：明确指定架构和编译器，使用Clang而非GCC
           export ARCH=arm64
