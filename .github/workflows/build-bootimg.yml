@@ -1,50 +1,89 @@
-name: Build Boot Image
+name: Build Boot Image with Repo Caching
 
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout repository
+      - name: Checkout main repo
         uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
-            git git-lfs gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
-            lib32z1-dev libelf-dev liblz4-tool libncurses5 libncurses5-dev \
-            libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync \
-            schedtool squashfs-tools xsltproc zip zlib1g-dev
+          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git git-lfs lib32ncurses5-dev lib32readline-dev lib32z1-dev libelf-dev liblz4-tool libncurses5-dev libssl-dev lzop rsync zip zlib1g-dev
 
-      - name: Fetch kernel source
+      # 1. 缓存内核源码
+      - name: Cache kernel source
+        id: cache-kernel
+        uses: actions/cache@v3
+        with:
+          path: ./kernel
+          # 缓存键：仓库地址+分支+最后更新时间（确保更新时失效）
+          key: kernel-${{ hashFiles('kernel_url.txt') }}-${{ github.sha }}
+          restore-keys: |
+            kernel-${{ hashFiles('kernel_url.txt') }}-
+
+      - name: Clone kernel source (if not cached)
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
         run: |
-          # 拉取内核源码（替换为你的内核仓库）
-          git clone https://github.com/LineageOS/android_kernel_sony_sm8550.git kernel
+          # 定义内核仓库地址和分支（可写死或通过文件管理）
+          KERNEL_REPO="https://github.com/LineageOS/android_kernel_sony_sm8550.git"
+          KERNEL_BRANCH="lineage-22.2"
+          
+          # 克隆仓库并切换分支
+          git clone $KERNEL_REPO kernel
           cd kernel
-          git checkout lineage-22.2  # 切换到目标分支
+          git checkout $KERNEL_BRANCH
+          # 记录当前 commit hash 到缓存标识文件（可选，用于后续校验）
+          git rev-parse HEAD > ../kernel_commit.txt
 
-      - name: Fetch device tree
+      # 2. 缓存设备树（同理）
+      - name: Cache device trees
+        id: cache-device
+        uses: actions/cache@v3
+        with:
+          path: |
+            ./device/sony/pdx234
+            ./device/sony/sm8550-common
+          key: device-trees-${{ hashFiles('device_urls.txt') }}-${{ github.sha }}
+          restore-keys: |
+            device-trees-${{ hashFiles('device_urls.txt') }}-
+
+      - name: Clone device trees (if not cached)
+        if: steps.cache-device.outputs.cache-hit != 'true'
         run: |
-          # 拉取设备树（替换为你的设备树仓库）
+          # 克隆设备树仓库
+          mkdir -p device/sony
           git clone https://github.com/LineageOS/android_device_sony_pdx234.git device/sony/pdx234
           git clone https://github.com/LineageOS/android_device_sony_sm8550-common.git device/sony/sm8550-common
+          
+          # 切换到目标分支
+          cd device/sony/pdx234 && git checkout lineage-22.2 && cd ../../..
+          cd device/sony/sm8550-common && git checkout lineage-22.2 && cd ../../..
 
-      - name: Download Clang toolchain
+      # 3. 缓存 Clang 工具链（复用之前的配置）
+      - name: Cache Clang toolchain
+        id: cache-clang
+        uses: actions/cache@v3
+        with:
+          path: ./clang-r498229b
+          key: clang-r498229b-${{ runner.os }}
+
+      - name: Download Clang (if not cached)
+        if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
-          # 下载适合的 Clang 工具链（以 r498229b 为例）
           wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-14.0.0_r35/clang-r498229b.tar.gz
-          mkdir -p clang-r498229b
-          tar -zxf clang-r498229b.tar.gz -C clang-r498229b
-          # 添加到环境变量
-          echo "PATH=$(pwd)/clang-r498229b/bin:$PATH" >> $GITHUB_ENV
+          mkdir -p clang-r498229b && tar -zxf clang-r498229b.tar.gz -C clang-r498229b && rm -f *.tar.gz
+
+      - name: Add Clang to PATH
+        run: echo "PATH=$(pwd)/clang-r498229b/bin:$PATH" >> $GITHUB_ENV
 
       - name: Build kernel
         run: |
@@ -57,7 +96,7 @@ jobs:
           export LD=ld.lld
 
           # 加载设备配置（从设备树中获取的 defconfig）
-          make O=out pdx234_defconfig  # 替换为你的设备配置
+          make O=out vendor/sony/pdx234_defconfig  # 替换为你的设备配置
 
           # 编译内核
           make O=out -j$(nproc)
@@ -69,7 +108,7 @@ jobs:
           cp -r device/sony/pdx234/ramdisk/* ramdisk/
           # 生成 ramdisk.img（打包为 cpio 格式）
           cd ramdisk
-          find . | cpio -o -H newc | gzip > ../ramdisk.img
+          find . | cpio -o -H newc | lz4 -l -12 -f - …/ramdisk.img
           cd ..
 
       - name: Build boot.img
@@ -80,16 +119,19 @@ jobs:
 
           # 从设备树的 BoardConfig 中获取参数（需手动提取关键参数）
           ./mkbootimg \
-            --kernel kernel/out/arch/arm64/boot/Image.gz-dtb \
-            --ramdisk ramdisk.img \
-            --base 0x00000000 \
-            --cmdline "console=ttyMSM0,115200n8 androidboot.hardware=qcom androidboot.console=ttyMSM0" \
-            --pagesize 4096 \
-            --ramdisk_offset 0x01000000 \
-            --tags_offset 0x00000100 \
-            --os_version 14 \
-            --os_patch_level 2024-05 \
-            --output boot.img
+    --kernel kernel/out/arch/arm64/boot/Image.gz-dtb \
+    --ramdisk ramdisk.img \
+    --base 0x00000000 \
+    --cmdline "video=vfb:640x400,bpp=32,memsize=3072000 nosoftlockup" \
+    --bootconfig "androidboot.hardware=qcom androidboot.memcg=1 androidboot.usbcontroller=a600000.dwc3" \
+    --pagesize 4096 \
+    --ramdiskoffset 0x01000000 \
+    --tagsoffset 0x00000100 \
+    --headerversion 4 \
+    --osversion 14 \
+    --ospatchlevel 2025-04 \
+    --output boot.img
+
 
       - name: Upload boot.img
         uses: actions/upload-artifact@v4
