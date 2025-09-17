@@ -1,10 +1,7 @@
-name: Build Boot Image (Split Jobs)
+name: Build Boot Image (GCC + KSU Option)
 
+# 仅手动触发
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
     inputs:
       kernel_branch:
@@ -17,17 +14,25 @@ on:
         required: true
         default: 'pdx234'
         type: string
+      build_type:
+        description: '编译类型'
+        required: true
+        default: 'original'
+        type: choice
+        options:
+          - original  # 原内核（无 KSU）
+          - with_ksu  # 带 KernelSU 内核
 
 jobs:
   # --------------------------
-  # Job 1：依赖准备与缓存（仅下载+缓存，不编译）
+  # Job 1：依赖准备与缓存（GCC 工具链）
   # --------------------------
   prepare-dependencies:
     runs-on: ubuntu-22.04
-    # 输出参数：传递设备代号、内核分支给编译Job
     outputs:
       device_codename: ${{ github.event.inputs.device_codename || 'pdx234' }}
       kernel_branch: ${{ github.event.inputs.kernel_branch || 'lineage-22.2' }}
+      build_type: ${{ github.event.inputs.build_type || 'original' }}
     steps:
       - name: Checkout main repo
         uses: actions/checkout@v4
@@ -35,17 +40,17 @@ jobs:
       - name: Install download dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git git-lfs wget curl lz4  # 仅保留下载所需工具
+          sudo apt-get install -y git git-lfs wget curl lz4 patch unzip  # 保留补丁工具，新增unzip（解压缩NDK）
 
-      # 1. 缓存内核源码
+      # 1. 缓存内核源码（含KSU补丁区分）
       - name: Cache kernel source
         id: cache-kernel
         uses: actions/cache@v3
         with:
           path: ./kernel
-          key: kernel-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.device_codename }}-${{ runner.os }}
+          key: kernel-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.device_codename }}-${{ github.event.inputs.build_type }}-${{ runner.os }}
           restore-keys: |
-            kernel-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.device_codename }}-
+            kernel-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.device_codename }}-${{ github.event.inputs.build_type }}-
 
       - name: Clone kernel source (if not cached)
         if: steps.cache-kernel.outputs.cache-hit != 'true'
@@ -55,7 +60,21 @@ jobs:
           git clone $KERNEL_REPO kernel
           cd kernel && git checkout $KERNEL_BRANCH && git rev-parse HEAD > ../kernel_commit.txt
 
-      # 2. 缓存设备树
+      # 2. 集成 KernelSU（仅with_ksu时执行）
+      - name: Integrate KernelSU (if build type is with_ksu)
+        if: github.event.inputs.build_type == 'with_ksu'
+        run: |
+          cd kernel
+          # 下载KSU补丁脚本
+          wget https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh -O ksu-setup.sh
+          chmod +x ksu-setup.sh
+          # 打KSU补丁（适配GCC编译）
+          ./ksu-setup.sh
+          # 记录KSU版本
+          KSU_VERSION=$(grep "KSU_VERSION" ./include/config/kernelsu.h | cut -d '"' -f2)
+          echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
+
+      # 3. 缓存设备树
       - name: Cache device trees
         id: cache-device
         uses: actions/cache@v3
@@ -78,35 +97,40 @@ jobs:
           cd device/sony/${DEVICE_CODENAME} && git checkout $KERNEL_BRANCH && cd ../../..
           cd device/sony/sm8550-common && git checkout $KERNEL_BRANCH && cd ../../..
 
-      # 3. 缓存 Clang 工具链
-      - name: Cache Clang toolchain
-        id: cache-clang
+      # 4. 缓存 GCC 交叉编译工具链（替换Clang，使用Android NDK中的aarch64-linux-android-gcc）
+      - name: Cache GCC toolchain (Android NDK)
+        id: cache-gcc
         uses: actions/cache@v3
         with:
-          path: ./clang-r498229b
-          key: clang-r498229b-${{ runner.os }}
+          path: ./android-ndk-r25b  # NDK目录（含aarch64-linux-android-gcc）
+          key: gcc-ndk-r25b-${{ runner.os }}  # NDK版本固定为r25b（最后支持GCC的稳定版）
           restore-keys: |
-            clang-r498229b-
+            gcc-ndk-r25b-
 
-      - name: Download Clang (if not cached)
-        if: steps.cache-clang.outputs.cache-hit != 'true'
+      - name: Download Android NDK (含aarch64-linux-android-gcc)
+        if: steps.cache-gcc.outputs.cache-hit != 'true'
         run: |
-          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-14.0.0_r35/clang-r498229b.tar.gz
-          mkdir -p clang-r498229b && tar -zxf clang-r498229b.tar.gz -C clang-r498229b && rm -f *.tar.gz
+          # 下载最后支持GCC的NDK版本（r25b，Android 13+推荐）
+          wget https://dl.google.com/android/repository/android-ndk-r25b-linux.zip -O ndk.zip
+          # 解压缩NDK（内含aarch64-linux-android-gcc工具链）
+          unzip ndk.zip
+          # 删除压缩包节省空间
+          rm -f ndk.zip
 
   # --------------------------
-  # Job 2：内核编译与 boot.img 生成
+  # Job 2：GCC编译内核与生成boot.img
   # --------------------------
   compile-bootimg:
     runs-on: ubuntu-22.04
-    needs: prepare-dependencies  # 依赖「准备Job」成功完成
+    needs: prepare-dependencies
     steps:
       - name: Checkout main repo
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install GCC build dependencies
         run: |
           sudo apt-get update
+          # 安装GCC编译依赖（含多架构支持）
           sudo apt-get install -y bc bison build-essential ccache flex g++-multilib gcc-multilib lib32ncurses5-dev lib32readline-dev lib32z1-dev libelf-dev liblz4-tool libncurses5-dev libssl-dev lzop rsync zip zlib1g-dev
 
       # 恢复内核源码缓存
@@ -114,7 +138,7 @@ jobs:
         uses: actions/cache@v3
         with:
           path: ./kernel
-          key: kernel-${{ needs.prepare-dependencies.outputs.kernel_branch }}-${{ needs.prepare-dependencies.outputs.device_codename }}-${{ runner.os }}
+          key: kernel-${{ needs.prepare-dependencies.outputs.kernel_branch }}-${{ needs.prepare-dependencies.outputs.device_codename }}-${{ needs.prepare-dependencies.outputs.build_type }}-${{ runner.os }}
 
       # 恢复设备树缓存
       - name: Restore device trees cache
@@ -125,34 +149,55 @@ jobs:
             ./device/sony/sm8550-common
           key: device-${{ needs.prepare-dependencies.outputs.device_codename }}-${{ needs.prepare-dependencies.outputs.kernel_branch }}-${{ runner.os }}
 
-      # 恢复 Clang 工具链并添加到PATH
-      - name: Restore Clang toolchain cache
+      # 恢复GCC工具链并添加到PATH
+      - name: Restore GCC toolchain (Android NDK)
         uses: actions/cache@v3
         with:
-          path: ./clang-r498229b
-          key: clang-r498229b-${{ runner.os }}
+          path: ./android-ndk-r25b
+          key: gcc-ndk-r25b-${{ runner.os }}
 
-      - name: Add Clang to PATH
-        run: echo "PATH=$(pwd)/clang-r498229b/bin:$PATH" >> $GITHUB_ENV
+      - name: Add aarch64-linux-android-gcc to PATH
+        run: |
+          # NDK中aarch64-linux-android-gcc的路径
+          GCC_PATH=$(pwd)/android-ndk-r25b/toolchains/llvm/prebuilt/linux-x86_64/bin
+          # 添加到环境变量（确保aarch64-linux-android-gcc可被找到）
+          echo "PATH=$GCC_PATH:$PATH" >> $GITHUB_ENV
+          # 验证编译器是否存在
+          if [ ! -f "$GCC_PATH/aarch64-linux-android-gcc" ]; then
+            echo "Error: aarch64-linux-android-gcc not found in NDK!"
+            exit 1
+          fi
 
-      # 编译内核
-      - name: Build kernel
+      # 用GCC编译内核
+      - name: Build kernel with aarch64-linux-android-gcc
         run: |
           cd kernel
+          # 核心：指定GCC交叉编译工具链
           export ARCH=arm64
+          # GCC前缀（NDK中已包含aarch64-linux-android-gcc）
           export CROSS_COMPILE=aarch64-linux-android-
           export CROSS_COMPILE_ARM32=arm-linux-androideabi-
-          export CC=clang
-          export LD=ld.lld
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export STRIP=llvm-strip
+          # 禁用Clang，强制使用GCC
+          unset CC
+          unset LD
+          unset AR
+          unset NM
+          unset OBJCOPY
+          unset OBJDUMP
+          unset STRIP
+          
+          # 加载设备专属配置
           make O=out defconfig
+          
+          # 启用KSU配置（若为with_ksu版本）
+          if [ "${{ needs.prepare-dependencies.outputs.build_type }}" = "with_ksu" ]; then
+            make O=out menuconfig KCONFIG_CONFIG=out/.config -e CONFIG_KERNEL_SU=y CONFIG_KERNEL_SU_MODULES=y
+          fi
+          
+          # 用GCC编译（-j参数加速）
           make O=out -j$(nproc)
 
-      # 生成 ramdisk（修复原命令语法错误）
+      # 生成ramdisk
       - name: Prepare ramdisk
         run: |
           DEVICE_CODENAME="${{ needs.prepare-dependencies.outputs.device_codename }}"
@@ -160,13 +205,25 @@ jobs:
           cp -r device/sony/${DEVICE_CODENAME}/ramdisk/* ramdisk/
           cd ramdisk && find . | cpio -o -H newc | lz4 -l -12 -f - ../ramdisk.img && cd ..
 
-      # 打包 boot.img
+      # 打包boot.img
       - name: Build boot.img
         run: |
           DEVICE_CODENAME="${{ needs.prepare-dependencies.outputs.device_codename }}"
           KERNEL_BRANCH="${{ needs.prepare-dependencies.outputs.kernel_branch }}"
+          BUILD_TYPE="${{ needs.prepare-dependencies.outputs.build_type }}"
+          
+          # 下载mkbootimg工具
           wget https://github.com/osm0sis/mkbootimg/releases/latest/download/mkbootimg -O mkbootimg
           chmod +x mkbootimg
+          
+          # 产物名区分（GCC编译+是否带KSU）
+          if [ "$BUILD_TYPE" = "with_ksu" ]; then
+            OUTPUT_NAME="boot-${DEVICE_CODENAME}-${KERNEL_BRANCH}-gcc-ksu-v${{ env.KSU_VERSION }}.img"
+          else
+            OUTPUT_NAME="boot-${DEVICE_CODENAME}-${KERNEL_BRANCH}-gcc-original.img"
+          fi
+          
+          # 打包
           ./mkbootimg \
             --kernel kernel/out/arch/arm64/boot/Image.gz-dtb \
             --ramdisk ramdisk.img \
@@ -179,11 +236,11 @@ jobs:
             --headerversion 4 \
             --osversion 14 \
             --ospatchlevel 2025-04 \
-            --output boot-${DEVICE_CODENAME}-${KERNEL_BRANCH}.img
+            --output $OUTPUT_NAME
 
       # 上传产物
       - name: Upload boot.img
         uses: actions/upload-artifact@v4
         with:
-          name: boot-image-${{ needs.prepare-dependencies.outputs.device_codename }}-${{ needs.prepare-dependencies.outputs.kernel_branch }}
-          path: boot-${{ needs.prepare-dependencies.outputs.device_codename }}-${{ needs.prepare-dependencies.outputs.kernel_branch }}.img
+          name: boot-image-${{ needs.prepare-dependencies.outputs.device_codename }}-gcc-${{ needs.prepare-dependencies.outputs.build_type }}
+          path: boot-${{ needs.prepare-dependencies.outputs.device_codename }}-*.img
