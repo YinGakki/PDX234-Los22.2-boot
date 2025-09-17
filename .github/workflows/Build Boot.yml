@@ -149,7 +149,7 @@ jobs:
           export OBJCOPY=llvm-objcopy
           export OBJDUMP=llvm-objdump
           export STRIP=llvm-strip
-          make O=out ${{ needs.prepare-dependencies.outputs.device_codename }}_defconfig
+          make O=out vendor/sony/pdx234_config
           make O=out -j$(nproc)
 
       # 生成 ramdisk（修复原命令语法错误）
