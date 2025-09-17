@@ -117,11 +117,6 @@ jobs:
         run: |
           # 直接克隆到当前目录，目录名简化为 aarch64-linux-android-4.9
           git clone -b lineage-19.1 --depth 1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git aarch64-linux-android-4.9
-          # 强制拉取完整内容（避免浅克隆遗漏文件）
-          cd aarch64-linux-android-4.9 && git fetch --depth=100 && git checkout lineage-19.1
-          # 查看目录结构（调试用，确认bin目录存在）
-          ls -l aarch64-linux-android-4.9
-
     
   # --------------------------
   # Job 2：LOS GCC编译内核与生成boot.img
