@@ -101,25 +101,28 @@ jobs:
           cd device/sony/${DEVICE_CODENAME} && git checkout $KERNEL_BRANCH && cd ../../..
           cd device/sony/sm8550-common && git checkout $KERNEL_BRANCH && cd ../../..
 
-      # 4. 缓存 LineageOS 官方 GCC 工具链（替换NDK）
-      - name: Cache LOS GCC toolchain
-        id: cache-los-gcc
-        uses: actions/cache@v3
-        with:
-          path: ./prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
-          # 缓存键：工具链仓库+分支+系统，确保版本唯一
-          key: los-gcc-aarch64-4.9-lineage-19.1-${{ runner.os }}
-          restore-keys: |
-            los-gcc-aarch64-4.9-lineage-19.1-
+# 4. 缓存 LineageOS 官方 GCC 工具链（替换NDK）
+- name: Cache LOS GCC toolchain
+  id: cache-los-gcc
+  uses: actions/cache@v3
+  with:
+    # 简化路径：直接指向克隆的根目录，避免多层嵌套错误
+    path: ./aarch64-linux-android-4.9
+    key: los-gcc-aarch64-4.9-lineage-19.1-${{ runner.os }}
+    restore-keys: |
+      los-gcc-aarch64-4.9-lineage-19.1-
 
-      - name: Clone LOS GCC toolchain (if not cached)
-        if: steps.cache-los-gcc.outputs.cache-hit != 'true'
-        run: |
-          # 创建工具链存放目录（与LineageOS源码目录结构一致）
-          mkdir -p prebuilts/gcc/linux-x86/aarch64
-          # 克隆LineageOS官方aarch64 GCC工具链（指定lineage-19.1分支）
-          git clone -b lineage-19.1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
+- name: Clone LOS GCC toolchain (if not cached)
+  if: steps.cache-los-gcc.outputs.cache-hit != 'true'
+  run: |
+    # 直接克隆到当前目录，目录名简化为 aarch64-linux-android-4.9
+    git clone -b lineage-19.1 --depth 1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git aarch64-linux-android-4.9
+    # 强制拉取完整内容（避免浅克隆遗漏文件）
+    cd aarch64-linux-android-4.9 && git fetch --depth=100 && git checkout lineage-19.1
+    # 查看目录结构（调试用，确认bin目录存在）
+    ls -l aarch64-linux-android-4.9
 
+    
   # --------------------------
   # Job 2：LOS GCC编译内核与生成boot.img
   # --------------------------
@@ -152,29 +155,36 @@ jobs:
             ./device/sony/sm8550-common
           key: device-${{ needs.prepare-dependencies.outputs.device_codename }}-${{ needs.prepare-dependencies.outputs.kernel_branch }}-${{ runner.os }}
 
-      # 恢复LineageOS GCC工具链并添加到PATH
-      - name: Restore LOS GCC toolchain
-        uses: actions/cache@v3
-        with:
-          path: ./prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
-          key: los-gcc-aarch64-4.9-lineage-19.1-${{ runner.os }}
+# 恢复LineageOS GCC工具链并添加到PATH
+- name: Restore LOS GCC toolchain
+  uses: actions/cache@v3
+  with:
+    path: ./aarch64-linux-android-4.9
+    key: los-gcc-aarch64-4.9-lineage-19.1-${{ runner.os }}
 
-      - name: Add LOS GCC to PATH
-        run: |
-          # LOS GCC工具链的bin目录路径（与克隆路径对应）
-          GCC_PATH=$(pwd)/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/bin
-          # 添加到环境变量
-          echo "PATH=$GCC_PATH:$PATH" >> $GITHUB_ENV
-          # 验证aarch64-linux-android-gcc是否存在（关键检查）
-          if [ ! -f "$GCC_PATH/aarch64-linux-android-gcc" ]; then
-            echo "Error: aarch64-linux-android-gcc not found in LOS GCC toolchain!"
-            echo "Toolchain path: $GCC_PATH"
-            # 列出目录内容便于调试
-            ls -l $GCC_PATH
-            exit 1
-          fi
-          # 验证编译器版本（可选，确认工具链正常）
-          aarch64-linux-android-gcc --version
+- name: Add LOS GCC to PATH (Force Path)
+  run: |
+    # 1. 先查找aarch64-linux-android-gcc的实际位置（自动定位，避免路径硬编码错误）
+    GCC_BIN_PATH=$(find $(pwd)/aarch64-linux-android-4.9 -name "aarch64-linux-android-gcc" | xargs dirname 2>/dev/null)
+    
+    # 2. 若找到路径，添加到PATH；否则报错并显示目录结构
+    if [ -n "$GCC_BIN_PATH" ]; then
+      echo "Found GCC bin path: $GCC_BIN_PATH"
+      echo "PATH=$GCC_BIN_PATH:$PATH" >> $GITHUB_ENV
+    else
+      echo "Error: aarch64-linux-android-gcc not found in toolchain!"
+      echo "Toolchain root structure:"
+      ls -lR $(pwd)/aarch64-linux-android-4.9  # 递归显示所有文件，便于排查
+      exit 1
+    fi
+    
+    # 3. 验证命令是否可用（最终确认）
+    if ! command -v aarch64-linux-android-gcc &> /dev/null; then
+      echo "Error: aarch64-linux-android-gcc still not in PATH!"
+      echo "Current PATH: $PATH"
+      exit 1
+    fi
+    aarch64-linux-android-gcc --version  # 显示版本，确认工具链正常
 
       # 用LOS GCC编译内核
       - name: Build kernel with LOS GCC
