@@ -159,7 +159,7 @@ jobs:
 
       - name: Add LOS GCC to PATH (Force Path)
         run: |
-            echo "Found GCC bin path: /home/runner/work/PDX234-Los22.2-boot/PDX234-Los22.2-boot/aarch64-linux-android-4.9/bin"
+            echo "Found GCC bin path: ${{ github.workspace }}/aarch64-linux-android-4.9/bin"
             echo "PATH=$GCC_BIN_PATH:$PATH" >> $GITHUB_ENV
     
       # 用LOS GCC编译内核
