@@ -155,36 +155,36 @@ jobs:
             ./device/sony/sm8550-common
           key: device-${{ needs.prepare-dependencies.outputs.device_codename }}-${{ needs.prepare-dependencies.outputs.kernel_branch }}-${{ runner.os }}
 
-# 恢复LineageOS GCC工具链并添加到PATH
-- name: Restore LOS GCC toolchain
-  uses: actions/cache@v3
-  with:
-    path: ./aarch64-linux-android-4.9
-    key: los-gcc-aarch64-4.9-lineage-19.1-${{ runner.os }}
+      # 恢复LineageOS GCC工具链并添加到PATH
+      - name: Restore LOS GCC toolchain
+        uses: actions/cache@v3
+        with:
+          path: ./aarch64-linux-android-4.9
+          key: los-gcc-aarch64-4.9-lineage-19.1-${{ runner.os }}
 
-- name: Add LOS GCC to PATH (Force Path)
-  run: |
-    # 1. 先查找aarch64-linux-android-gcc的实际位置（自动定位，避免路径硬编码错误）
-    GCC_BIN_PATH=$(find $(pwd)/aarch64-linux-android-4.9 -name "aarch64-linux-android-gcc" | xargs dirname 2>/dev/null)
+      - name: Add LOS GCC to PATH (Force Path)
+        run: |
+          # 1. 先查找aarch64-linux-android-gcc的实际位置（自动定位，避免路径硬编码错误）
+          GCC_BIN_PATH=$(find $(pwd)/aarch64-linux-android-4.9 -name "aarch64-linux-android-gcc" | xargs dirname 2>/dev/null)
     
-    # 2. 若找到路径，添加到PATH；否则报错并显示目录结构
-    if [ -n "$GCC_BIN_PATH" ]; then
-      echo "Found GCC bin path: $GCC_BIN_PATH"
-      echo "PATH=$GCC_BIN_PATH:$PATH" >> $GITHUB_ENV
-    else
-      echo "Error: aarch64-linux-android-gcc not found in toolchain!"
-      echo "Toolchain root structure:"
-      ls -lR $(pwd)/aarch64-linux-android-4.9  # 递归显示所有文件，便于排查
-      exit 1
-    fi
+          # 2. 若找到路径，添加到PATH；否则报错并显示目录结构
+          if [ -n "$GCC_BIN_PATH" ]; then
+            echo "Found GCC bin path: $GCC_BIN_PATH"
+            echo "PATH=$GCC_BIN_PATH:$PATH" >> $GITHUB_ENV
+          else
+            echo "Error: aarch64-linux-android-gcc not found in toolchain!"
+            echo "Toolchain root structure:"
+            ls -lR $(pwd)/aarch64-linux-android-4.9  # 递归显示所有文件，便于排查
+            exit 1
+          fi
     
-    # 3. 验证命令是否可用（最终确认）
-    if ! command -v aarch64-linux-android-gcc &> /dev/null; then
-      echo "Error: aarch64-linux-android-gcc still not in PATH!"
-      echo "Current PATH: $PATH"
-      exit 1
-    fi
-    aarch64-linux-android-gcc --version  # 显示版本，确认工具链正常
+          # 3. 验证命令是否可用（最终确认）
+          if ! command -v aarch64-linux-android-gcc &> /dev/null; then
+            echo "Error: aarch64-linux-android-gcc still not in PATH!"
+            echo "Current PATH: $PATH"
+            exit 1
+          fi
+          aarch64-linux-android-gcc --version  # 显示版本，确认工具链正常
 
       # 用LOS GCC编译内核
       - name: Build kernel with LOS GCC
