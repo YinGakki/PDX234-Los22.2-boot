@@ -1,0 +1,237 @@
+name: Build Boot Image (GCC + SukiSU Option)
+
+# 仅手动触发
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: '内核源码分支'
+        required: true
+        default: 'lineage-22.2'
+        type: string
+      device_codename:
+        description: '设备代号（如 pdx234）'
+        required: true
+        default: 'pdx234'
+        type: string
+      build_type:
+        description: '编译类型'
+        required: true
+        default: 'original'
+        type: choice
+        options:
+          - original  # 原内核（无 SukiSU）
+          - with_sukisu  # 带 SukiSU 内核
+
+jobs:
+  # --------------------------
+  # Job 1：依赖准备与缓存（GCC 工具链 + SukiSU）
+  # --------------------------
+  prepare-dependencies:
+    runs-on: ubuntu-22.04
+    outputs:
+      device_codename: ${{ github.event.inputs.device_codename || 'pdx234' }}
+      kernel_branch: ${{ github.event.inputs.kernel_branch || 'lineage-22.2' }}
+      build_type: ${{ github.event.inputs.build_type || 'original' }}
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+
+      - name: Install download dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git git-lfs wget curl lz4 patch unzip  # 保留curl（SukiSU依赖）
+
+      # 1. 缓存内核源码（含SukiSU补丁区分）
+      - name: Cache kernel source
+        id: cache-kernel
+        uses: actions/cache@v3
+        with:
+          path: ./kernel
+          key: kernel-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.device_codename }}-${{ github.event.inputs.build_type }}-${{ runner.os }}
+          restore-keys: |
+            kernel-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.device_codename }}-${{ github.event.inputs.build_type }}-
+
+      - name: Clone kernel source (if not cached)
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: |
+          KERNEL_REPO="https://github.com/LineageOS/android_kernel_sony_sm8550.git"
+          KERNEL_BRANCH="${{ github.event.inputs.kernel_branch || 'lineage-22.2' }}"
+          git clone $KERNEL_REPO kernel
+          cd kernel && git checkout $KERNEL_BRANCH && git rev-parse HEAD > ../kernel_commit.txt
+
+      # 2. 集成 SukiSU（仅with_sukisu时执行，使用指定curl命令）
+      - name: Integrate SukiSU (if build type is with_sukisu)
+        if: github.event.inputs.build_type == 'with_sukisu'
+        run: |
+          cd kernel
+          # 核心修改：使用curl管道执行SukiSU-Ultra的setup.sh（指定main分支）
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
+          
+          # 提取SukiSU版本（适配SukiSU的版本定义文件，若路径不同需调整）
+          if [ -f ./include/config/sukisu.h ]; then
+            SUKISU_VERSION=$(grep "SUKISU_VERSION" ./include/config/sukisu.h | cut -d '"' -f2)
+          elif [ -f ./include/config/kernelsu.h ]; then
+            # 若SukiSU沿用KernelSU的版本定义，兼容读取
+            SUKISU_VERSION=$(grep "KSU_VERSION" ./include/config/kernelsu.h | cut -d '"' -f2)
+          else
+            SUKISU_VERSION="unknown"
+          fi
+          echo "SUKISU_VERSION=$SUKISU_VERSION" >> $GITHUB_ENV
+
+      # 3. 缓存设备树
+      - name: Cache device trees
+        id: cache-device
+        uses: actions/cache@v3
+        with:
+          path: |
+            ./device/sony/${{ github.event.inputs.device_codename || 'pdx234' }}
+            ./device/sony/sm8550-common
+          key: device-${{ github.event.inputs.device_codename }}-${{ github.event.inputs.kernel_branch }}-${{ runner.os }}
+          restore-keys: |
+            device-${{ github.event.inputs.device_codename }}-
+
+      - name: Clone device trees (if not cached)
+        if: steps.cache-device.outputs.cache-hit != 'true'
+        run: |
+          DEVICE_CODENAME="${{ github.event.inputs.device_codename || 'pdx234' }}"
+          KERNEL_BRANCH="${{ github.event.inputs.kernel_branch || 'lineage-22.2' }}"
+          mkdir -p device/sony
+          git clone https://github.com/LineageOS/android_device_sony_${DEVICE_CODENAME}.git device/sony/${DEVICE_CODENAME}
+          git clone https://github.com/LineageOS/android_device_sony_sm8550-common.git device/sony/sm8550-common
+          cd device/sony/${DEVICE_CODENAME} && git checkout $KERNEL_BRANCH && cd ../../..
+          cd device/sony/sm8550-common && git checkout $KERNEL_BRANCH && cd ../../..
+
+      # 4. 缓存 GCC 交叉编译工具链（Android NDK）
+      - name: Cache GCC toolchain (Android NDK)
+        id: cache-gcc
+        uses: actions/cache@v3
+        with:
+          path: ./android-ndk-r25b
+          key: gcc-ndk-r25b-${{ runner.os }}
+          restore-keys: |
+            gcc-ndk-r25b-
+
+      - name: Download Android NDK (含aarch64-linux-android-gcc)
+        if: steps.cache-gcc.outputs.cache-hit != 'true'
+        run: |
+          wget https://dl.google.com/android/repository/android-ndk-r25b-linux.zip -O ndk.zip
+          unzip ndk.zip
+          rm -f ndk.zip
+
+  # --------------------------
+  # Job 2：GCC编译内核与生成boot.img
+  # --------------------------
+  compile-bootimg:
+    runs-on: ubuntu-22.04
+    needs: prepare-dependencies
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+
+      - name: Install GCC build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache flex g++-multilib gcc-multilib lib32ncurses5-dev lib32readline-dev lib32z1-dev libelf-dev liblz4-tool libncurses5-dev libssl-dev lzop rsync zip zlib1g-dev
+
+      # 恢复内核源码缓存（含SukiSU补丁）
+      - name: Restore kernel source cache
+        uses: actions/cache@v3
+        with:
+          path: ./kernel
+          key: kernel-${{ needs.prepare-dependencies.outputs.kernel_branch }}-${{ needs.prepare-dependencies.outputs.device_codename }}-${{ needs.prepare-dependencies.outputs.build_type }}-${{ runner.os }}
+
+      # 恢复设备树缓存
+      - name: Restore device trees cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ./device/sony/${{ needs.prepare-dependencies.outputs.device_codename }}
+            ./device/sony/sm8550-common
+          key: device-${{ needs.prepare-dependencies.outputs.device_codename }}-${{ needs.prepare-dependencies.outputs.kernel_branch }}-${{ runner.os }}
+
+      # 恢复GCC工具链并添加到PATH
+      - name: Restore GCC toolchain (Android NDK)
+        uses: actions/cache@v3
+        with:
+          path: ./android-ndk-r25b
+          key: gcc-ndk-r25b-${{ runner.os }}
+
+      - name: Add aarch64-linux-android-gcc to PATH
+        run: |
+          GCC_PATH=$(pwd)/android-ndk-r25b/toolchains/llvm/prebuilt/linux-x86_64/bin
+          echo "PATH=$GCC_PATH:$PATH" >> $GITHUB_ENV
+          # 验证编译器
+          if [ ! -f "$GCC_PATH/aarch64-linux-android-gcc" ]; then
+            echo "Error: aarch64-linux-android-gcc not found in NDK!"
+            exit 1
+          fi
+
+      # 用GCC编译内核（含SukiSU配置）
+      - name: Build kernel with aarch64-linux-android-gcc
+        run: |
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+          unset CC LD AR NM OBJCOPY OBJDUMP STRIP
+          
+          # 加载设备配置
+          make O=out ${{ needs.prepare-dependencies.outputs.device_codename }}_defconfig
+          
+          # 启用SukiSU配置（若为with_sukisu版本）
+          if [ "${{ needs.prepare-dependencies.outputs.build_type }}" = "with_sukisu" ]; then
+            # 适配SukiSU的配置项（若为自定义项需替换为SukiSU实际配置名）
+            make O=out menuconfig KCONFIG_CONFIG=out/.config -e CONFIG_SUKISU=y CONFIG_SUKISU_MODULES=y
+          fi
+          
+          # 编译
+          make O=out -j$(nproc)
+
+      # 生成ramdisk
+      - name: Prepare ramdisk
+        run: |
+          DEVICE_CODENAME="${{ needs.prepare-dependencies.outputs.device_codename }}"
+          mkdir -p ramdisk
+          cp -r device/sony/${DEVICE_CODENAME}/ramdisk/* ramdisk/
+          cd ramdisk && find . | cpio -o -H newc | lz4 -l -12 -f - ../ramdisk.img && cd ..
+
+      # 打包boot.img（产物名含SukiSU标识）
+      - name: Build boot.img
+        run: |
+          DEVICE_CODENAME="${{ needs.prepare-dependencies.outputs.device_codename }}"
+          KERNEL_BRANCH="${{ needs.prepare-dependencies.outputs.kernel_branch }}"
+          BUILD_TYPE="${{ needs.prepare-dependencies.outputs.build_type }}"
+          
+          # 下载mkbootimg
+          wget https://github.com/osm0sis/mkbootimg/releases/latest/download/mkbootimg -O mkbootimg
+          chmod +x mkbootimg
+          
+          # 产物名区分
+          if [ "$BUILD_TYPE" = "with_sukisu" ]; then
+            OUTPUT_NAME="boot-${DEVICE_CODENAME}-${KERNEL_BRANCH}-gcc-sukisu-v${{ env.SUKISU_VERSION }}.img"
+          else
+            OUTPUT_NAME="boot-${DEVICE_CODENAME}-${KERNEL_BRANCH}-gcc-original.img"
+          fi
+          
+          # 打包
+          ./mkbootimg \
+            --kernel kernel/out/arch/arm64/boot/Image.gz-dtb \
+            --ramdisk ramdisk.img \
+            --base 0x00000000 \
+            --cmdline "video=vfb:640x400,bpp=32,memsize=3072000 nosoftlockup" \
+            --bootconfig "androidboot.hardware=qcom androidboot.memcg=1 androidboot.usbcontroller=a600000.dwc3" \
+            --pagesize 4096 \
+            --ramdiskoffset 0x01000000 \
+            --tagsoffset 0x00000100 \
+            --headerversion 4 \
+            --osversion 14 \
+            --ospatchlevel 2025-04 \
+            --output $OUTPUT_NAME
+
+      # 上传产物
+      - name: Upload boot.img
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-image-${{ needs.prepare-dependencies.outputs.device_codename }}-gcc-${{ needs.prepare-dependencies.outputs.build_type }}
+          path: boot-${{ needs.prepare-dependencies.outputs.device_codename }}-*.img
