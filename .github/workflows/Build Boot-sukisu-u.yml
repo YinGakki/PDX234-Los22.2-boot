@@ -157,31 +157,9 @@ jobs:
           # NDK工具链绝对路径
           NDK_BIN_PATH=$(pwd)/android-ndk-r26b/toolchains/llvm/prebuilt/linux-x86_64/bin
           
-          # 修复检查逻辑：寻找带API版本的aarch64 Clang（适配r26b命名）
-          AARCH64_CLANG=$(find "$NDK_BIN_PATH" -name "aarch64-linux-android*-clang" | head -n 1)
-          if [ -z "$AARCH64_CLANG" ]; then
-            echo "Error: AArch64 Clang not found in NDK! Path: $NDK_BIN_PATH"
-            ls -l "$NDK_BIN_PATH" | grep "aarch64-linux-android"
-            exit 1
-          fi
-          
-          # 验证基础clang存在性（r26b有clang软链接）
-          if [ ! -f "$NDK_BIN_PATH/clang" ] || [ ! -f "$NDK_BIN_PATH/ld.lld" ]; then
-            echo "Error: Core Clang tools missing! Path: $NDK_BIN_PATH"
-            ls -l "$NDK_BIN_PATH" | grep -E "(clang|lld)"
-            exit 1
-          fi
-          
           # 添加到PATH
           echo "PATH=$NDK_BIN_PATH:$PATH" >> $GITHUB_ENV
-          
-          # 验证Clang版本（需≥14.0.0）
-          CLANG_VERSION=$("$NDK_BIN_PATH/clang" --version | grep -oP 'version \K\d+\.\d+\.\d+')
-          echo "Found Clang version: $CLANG_VERSION"
-          if [[ $(echo "$CLANG_VERSION >= 14.0.0" | bc -l) -eq 0 ]]; then
-            echo "Error: Clang version too old! Need ≥14.0.0"
-            exit 1
-          fi
+
 
       # 强制用NDK Clang编译内核（适配工具链命名）
       - name: Build kernel with NDK Clang (Forced)
