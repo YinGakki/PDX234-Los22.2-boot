@@ -182,16 +182,16 @@ jobs:
           unset GCC CCACHE_COMPILER
           
           # 加载设备专属defconfig（必须带设备代号，修复原defconfig不存在问题）
-          make O=out defconfig
+          make O=out CC=aarch64-linux-android34-clang defconfig
           
           # 启用SukiSU配置（适配实际配置项）
           if [ "${{ needs.prepare-dependencies.outputs.build_type }}" = "with_sukisu" ]; then
             # 若SukiSU基于KernelSU，配置项为CONFIG_KERNEL_SU
-            make O=out menuconfig KCONFIG_CONFIG=out/.config -e CONFIG_KERNEL_SU=y CONFIG_KERNEL_SU_MODULES=y
+            make O=out CC=aarch64-linux-android34-clang menuconfig KCONFIG_CONFIG=out/.config -e CONFIG_KERNEL_SU=y CONFIG_KERNEL_SU_MODULES=y
           fi
           
           # 编译
-          make O=out -j$(nproc)
+          make O=out CC=aarch64-linux-android34-clang -j$(nproc)
 
       # 生成ramdisk
       - name: Prepare ramdisk
