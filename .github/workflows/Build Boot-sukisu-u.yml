@@ -1,4 +1,4 @@
-name: Build Boot Image (LOS GCC + SukiSU Option)
+name: Build Boot Image (NDK Clang + SukiSU Option)
 
 # 仅手动触发
 on:
@@ -25,7 +25,7 @@ on:
 
 jobs:
   # --------------------------
-  # Job 1：依赖准备与缓存（LOS GCC 工具链 + SukiSU）
+  # Job 1：依赖准备与缓存（NDK Clang + SukiSU）
   # --------------------------
   prepare-dependencies:
     runs-on: ubuntu-22.04
@@ -40,7 +40,7 @@ jobs:
       - name: Install download dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git git-lfs wget curl lz4 patch  # 移除unzip（无需解压缩NDK）
+          sudo apt-get install -y git git-lfs wget curl lz4 patch unzip  # 恢复unzip（解压缩NDK）
 
       # 1. 缓存内核源码（含SukiSU补丁区分）
       - name: Cache kernel source
@@ -101,25 +101,26 @@ jobs:
           cd device/sony/${DEVICE_CODENAME} && git checkout $KERNEL_BRANCH && cd ../../..
           cd device/sony/sm8550-common && git checkout $KERNEL_BRANCH && cd ../../..
 
-      # 4. 缓存 LineageOS 官方 GCC 工具链（替换NDK）
-      - name: Cache LOS GCC toolchain
-        id: cache-los-gcc
+      # 4. 缓存 Android NDK（含Clang工具链，适配Android 14）
+      - name: Cache Android NDK (Clang)
+        id: cache-ndk
         uses: actions/cache@v3
         with:
-          # 简化路径：直接指向克隆的根目录，避免多层嵌套错误
-          path: ./aarch64-linux-android-4.9
-          key: los-gcc-aarch64-4.9-lineage-19.1-${{ runner.os }}
+          path: ./android-ndk-r26b  # r26b：适配Android 14的稳定版NDK，Clang版本充足
+          key: ndk-r26b-clang-${{ runner.os }}
           restore-keys: |
-            los-gcc-aarch64-4.9-lineage-19.1-
+            ndk-r26b-clang-
 
-      - name: Clone LOS GCC toolchain (if not cached)
-        if: steps.cache-los-gcc.outputs.cache-hit != 'true'
+      - name: Download Android NDK (含Clang)
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
         run: |
-          # 直接克隆到当前目录，目录名简化为 aarch64-linux-android-4.9
-          git clone -b lineage-19.1 --depth 1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git aarch64-linux-android-4.9
-    
+          # 下载适配Android 14的NDK（r26b，内置Clang 17.0.2，满足内核需求）
+          wget https://dl.google.com/android/repository/android-ndk-r26b-linux.zip -O ndk.zip
+          unzip ndk.zip  # 解压后自动生成 android-ndk-r26b 目录
+          rm -f ndk.zip  # 清理压缩包
+
   # --------------------------
-  # Job 2：LOS GCC编译内核与生成boot.img
+  # Job 2：NDK Clang编译内核与生成boot.img
   # --------------------------
   compile-bootimg:
     runs-on: ubuntu-22.04
@@ -128,10 +129,10 @@ jobs:
       - name: Checkout main repo
         uses: actions/checkout@v4
 
-      - name: Install GCC build dependencies
+      - name: Install Clang build dependencies
         run: |
           sudo apt-get update
-          # 保留LineageOS内核编译必需依赖
+          # 安装Clang编译必需依赖（保留多架构支持）
           sudo apt-get install -y bc bison build-essential ccache flex g++-multilib gcc-multilib lib32ncurses5-dev lib32readline-dev lib32z1-dev libelf-dev liblz4-tool libncurses5-dev libssl-dev lzop rsync zip zlib1g-dev
 
       # 恢复内核源码缓存
@@ -150,40 +151,66 @@ jobs:
             ./device/sony/sm8550-common
           key: device-${{ needs.prepare-dependencies.outputs.device_codename }}-${{ needs.prepare-dependencies.outputs.kernel_branch }}-${{ runner.os }}
 
-      # 恢复LineageOS GCC工具链并添加到PATH
-      - name: Restore LOS GCC toolchain
+      # 恢复NDK并配置Clang路径
+      - name: Restore Android NDK (Clang)
         uses: actions/cache@v3
         with:
-          path: ./aarch64-linux-android-4.9
-          key: los-gcc-aarch64-4.9-lineage-19.1-${{ runner.os }}
+          path: ./android-ndk-r26b
+          key: ndk-r26b-clang-${{ runner.os }}
 
-      - name: Add LOS GCC to PATH (Force Path)
+      - name: Configure NDK Clang Path (Force Enable)
         run: |
-            echo "Found GCC bin path: ${{ github.workspace }}/aarch64-linux-android-4.9/bin"
-            echo "PATH=$GCC_BIN_PATH:$PATH" >> $GITHUB_ENV
-    
-      # 用LOS GCC编译内核
-      - name: Build kernel with LOS GCC
-        run: |
-          cd kernel
-          # 配置LineageOS内核编译环境
-          export ARCH=arm64
-          # 指定LOS GCC工具链前缀（与工具链文件名匹配）
-          export CROSS_COMPILE=aarch64-linux-android-
-          export CROSS_COMPILE_ARM32=arm-linux-androideabi-  # 若需32位兼容（可选）
-          # 清除可能的Clang环境变量干扰
-          unset CC LD AR NM OBJCOPY OBJDUMP STRIP
+          # NDK中Clang工具链的绝对路径（r26b目录结构固定）
+          NDK_CLANG_PATH=$(pwd)/android-ndk-r26b/toolchains/llvm/prebuilt/linux-x86_64/bin
           
-          # 加载设备专属defconfig（LineageOS内核标准流程）
-          make O=out defconfig
-          
-          # 启用SukiSU配置（若为with_sukisu版本）
-          if [ "${{ needs.prepare-dependencies.outputs.build_type }}" = "with_sukisu" ]; then
-            # 根据SukiSU实际配置项调整（此处为通用适配）
-            make O=out menuconfig KCONFIG_CONFIG=out/.config -e CONFIG_SUKISU=y CONFIG_SUKISU_MODULES=y
+          # 验证Clang是否存在（强制检查，避免路径错误）
+          if [ ! -f "$NDK_CLANG_PATH/clang" ] || [ ! -f "$NDK_CLANG_PATH/aarch64-linux-android-clang" ]; then
+            echo "Error: Clang not found in NDK! Path: $NDK_CLANG_PATH"
+            ls -l $NDK_CLANG_PATH  # 显示目录内容便于调试
+            exit 1
           fi
           
-          # 开始编译（-j$(nproc) 自动适配CPU核心数）
+          # 添加Clang到PATH（优先级最高）
+          echo "PATH=$NDK_CLANG_PATH:$PATH" >> $GITHUB_ENV
+          
+          # 验证Clang版本（需≥14.0.0，r26b自带17.0.2，满足lineage-22.2需求）
+          CLANG_VERSION=$($NDK_CLANG_PATH/clang --version | grep -oP 'version \K\d+\.\d+\.\d+')
+          echo "Found Clang version: $CLANG_VERSION"
+          if [[ $(echo "$CLANG_VERSION >= 14.0.0" | bc -l) -eq 0 ]]; then
+            echo "Error: Clang version too old! Need ≥14.0.0"
+            exit 1
+          fi
+
+      # 用NDK Clang强制编译内核（核心步骤）
+      - name: Build kernel with NDK Clang (Forced)
+        run: |
+          cd kernel
+          # 1. 基础架构配置
+          export ARCH=arm64
+          # 2. 交叉编译工具链前缀（NDK内置，与Clang匹配）
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+          # 3. 强制指定Clang相关工具（覆盖所有可能的GCC干扰）
+          export CC=aarch64-linux-android-clang  # NDK专用Clang前端
+          export LD=aarch64-linux-android-ld.lld  # Clang配套链接器
+          export AR=aarch64-linux-android-llvm-ar
+          export NM=aarch64-linux-android-llvm-nm
+          export OBJCOPY=aarch64-linux-android-llvm-objcopy
+          export OBJDUMP=aarch64-linux-android-llvm-objdump
+          export STRIP=aarch64-linux-android-llvm-strip
+          # 4. 清除残留的GCC环境变量（双重保险）
+          unset GCC CCACHE_COMPILER
+          
+          # 5. 加载设备专属defconfig（必须指定设备代号，原defconfig可能不存在）
+          make O=out defconfig
+          
+          # 6. 启用SukiSU配置（若为with_sukisu版本）
+          if [ "${{ needs.prepare-dependencies.outputs.build_type }}" = "with_sukisu" ]; then
+            # 强制开启SukiSU配置（根据实际配置项调整，此处兼容KernelSU命名）
+            make O=out menuconfig KCONFIG_CONFIG=out/.config -e CONFIG_KERNEL_SU=y CONFIG_KERNEL_SU_MODULES=y
+          fi
+          
+          # 7. 开始编译（-j$(nproc) 自动利用所有CPU核心）
           make O=out -j$(nproc)
 
       # 生成ramdisk
@@ -201,18 +228,18 @@ jobs:
           KERNEL_BRANCH="${{ needs.prepare-dependencies.outputs.kernel_branch }}"
           BUILD_TYPE="${{ needs.prepare-dependencies.outputs.build_type }}"
           
-          # 下载mkbootimg工具
+          # 下载mkbootimg工具（适配Android 14的boot.img格式）
           wget https://github.com/osm0sis/mkbootimg/releases/latest/download/mkbootimg -O mkbootimg
           chmod +x mkbootimg
           
-          # 产物名含LOS GCC标识，便于区分
+          # 产物名含NDK Clang标识，明确编译环境
           if [ "$BUILD_TYPE" = "with_sukisu" ]; then
-            OUTPUT_NAME="boot-${DEVICE_CODENAME}-${KERNEL_BRANCH}-los-gcc-sukisu-v${{ env.SUKISU_VERSION }}.img"
+            OUTPUT_NAME="boot-${DEVICE_CODENAME}-${KERNEL_BRANCH}-ndk-clang-sukisu-v${{ env.SUKISU_VERSION }}.img"
           else
-            OUTPUT_NAME="boot-${DEVICE_CODENAME}-${KERNEL_BRANCH}-los-gcc-original.img"
+            OUTPUT_NAME="boot-${DEVICE_CODENAME}-${KERNEL_BRANCH}-ndk-clang-original.img"
           fi
           
-          # 打包boot.img（参数与LineageOS设备树匹配）
+          # 打包boot.img（参数与LineageOS官方保持一致）
           ./mkbootimg \
             --kernel kernel/out/arch/arm64/boot/Image.gz-dtb \
             --ramdisk ramdisk.img \
@@ -231,5 +258,5 @@ jobs:
       - name: Upload boot.img
         uses: actions/upload-artifact@v4
         with:
-          name: boot-image-${{ needs.prepare-dependencies.outputs.device_codename }}-los-gcc-${{ needs.prepare-dependencies.outputs.build_type }}
+          name: boot-image-${{ needs.prepare-dependencies.outputs.device_codename }}-ndk-clang-${{ needs.prepare-dependencies.outputs.build_type }}
           path: boot-${{ needs.prepare-dependencies.outputs.device_codename }}-*.img
