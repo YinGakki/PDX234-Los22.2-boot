@@ -159,8 +159,6 @@ jobs:
           
           # 添加到PATH
           echo "PATH=$NDK_BIN_PATH:$PATH" >> $GITHUB_ENV
-          
-          ln -s "$NDK_BIN_PATH/ld.lld" "$NDK_BIN_PATH/ld64.lld"
 
       # 强制用NDK Clang编译内核（适配工具链命名）
       - name: Build kernel with NDK Clang (Forced)
