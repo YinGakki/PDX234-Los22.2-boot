@@ -159,7 +159,8 @@ jobs:
           
           # 添加到PATH
           echo "PATH=$NDK_BIN_PATH:$PATH" >> $GITHUB_ENV
-
+          
+          ln -s "$NDK_BIN_PATH/ld.lld" "$NDK_BIN_PATH/aarch64-linux-android34-ld"
 
       # 强制用NDK Clang编译内核（适配工具链命名）
       - name: Build kernel with NDK Clang (Forced)
@@ -182,7 +183,7 @@ jobs:
           unset GCC CCACHE_COMPILER
           
           # 加载设备专属defconfig（必须带设备代号，修复原defconfig不存在问题）
-          make O=out CC=aarch64-linux-android34-clang defconfig
+          make O=out CC=aarch64-linux-android34-clang LD=aarch64-linux-android34-ld.lld defconfig
           
           # 启用SukiSU配置（适配实际配置项）
           if [ "${{ needs.prepare-dependencies.outputs.build_type }}" = "with_sukisu" ]; then
@@ -191,7 +192,7 @@ jobs:
           fi
           
           # 编译
-          make O=out CC=aarch64-linux-android34-clang -j$(nproc)
+          make O=out CC=aarch64-linux-android34-clang LD=aarch64-linux-android34-ld.lld -j$(nproc)
 
       # 生成ramdisk
       - name: Prepare ramdisk
