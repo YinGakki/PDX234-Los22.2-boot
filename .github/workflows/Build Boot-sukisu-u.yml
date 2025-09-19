@@ -172,11 +172,11 @@ jobs:
           # 强制指定Clang工具链（使用带API版本的命令）
           export CC=aarch64-linux-android34-clang
           export LD=ld.lld
-          export AR=aarch64-linux-android34-llvm-ar
-          export NM=aarch64-linux-android34-llvm-nm
-          export OBJCOPY=aarch64-linux-android34-llvm-objcopy
-          export OBJDUMP=aarch64-linux-android34-llvm-objdump
-          export STRIP=aarch64-linux-android34-llvm-strip
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
           # 清除干扰变量
           unset GCC CCACHE_COMPILER
           
