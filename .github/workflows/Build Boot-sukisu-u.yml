@@ -161,6 +161,12 @@ jobs:
           # 添加到PATH
           echo "PATH=$NDK_BIN_PATH:$PATH" >> $GITHUB_ENV
 
+      # 修复NDK目录权限
+      - name: Fix NDK directory permissions
+        run: |
+          # 确保我们对NDK目录有写入权限
+          sudo chmod -R u+w ./android-ndk-r26b/toolchains/llvm/prebuilt/linux-x86_64/bin/
+          
       # 强制用NDK Clang编译内核（适配工具链命名）
       - name: Build kernel with NDK Clang (Forced)
         run: |
@@ -179,11 +185,11 @@ jobs:
           unset GCC CCACHE_COMPILER
 
           # 使用系统自带的binutils替代NDK的llvm-objdump，解决格式识别问题
-          ln -sf /usr/bin/aarch64-linux-gnu-objdump "$NDK_BIN_PATH/aarch64-linux-android34-objdump"
-          ln -sf /usr/bin/aarch64-linux-gnu-nm "$NDK_BIN_PATH/aarch64-linux-android34-nm"
-          ln -sf /usr/bin/aarch64-linux-gnu-objcopy "$NDK_BIN_PATH/aarch64-linux-android34-objcopy"
-          ln -sf /usr/bin/aarch64-linux-gnu-strip "$NDK_BIN_PATH/aarch64-linux-android34-strip"
-          ln -sf /usr/bin/aarch64-linux-gnu-ar "$NDK_BIN_PATH/aarch64-linux-android34-ar"
+          sudo ln -sf /usr/bin/aarch64-linux-gnu-objdump "$NDK_BIN_PATH/aarch64-linux-android34-objdump"
+          sudo ln -sf /usr/bin/aarch64-linux-gnu-nm "$NDK_BIN_PATH/aarch64-linux-android34-nm"
+          sudo ln -sf /usr/bin/aarch64-linux-gnu-objcopy "$NDK_BIN_PATH/aarch64-linux-android34-objcopy"
+          sudo ln -sf /usr/bin/aarch64-linux-gnu-strip "$NDK_BIN_PATH/aarch64-linux-android34-strip"
+          sudo ln -sf /usr/bin/aarch64-linux-gnu-ar "$NDK_BIN_PATH/aarch64-linux-android34-ar"
           
           # 加载设备专属defconfig（必须带设备代号，修复原defconfig不存在问题）
           make O=out CC=aarch64-linux-android34-clang LD=ld.lld defconfig
