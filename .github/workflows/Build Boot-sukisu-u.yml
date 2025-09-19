@@ -181,7 +181,7 @@ jobs:
           unset GCC CCACHE_COMPILER
           
           # 加载设备专属defconfig（必须带设备代号，修复原defconfig不存在问题）
-          make O=out CC=aarch64-linux-android34-clang LD=aarch64-linux-android34-ld.lld defconfig
+          make O=out CC=aarch64-linux-android34-clang LD=ld.lld defconfig
           
           # 启用SukiSU配置（适配实际配置项）
           if [ "${{ needs.prepare-dependencies.outputs.build_type }}" = "with_sukisu" ]; then
