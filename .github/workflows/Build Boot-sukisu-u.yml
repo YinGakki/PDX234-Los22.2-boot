@@ -1,4 +1,4 @@
-name: Build Boot Image (NDK Clang + SukiSU Option)
+name: Build Boot Image (AOSP Clang + SukiSU Option)  # 更新名称，明确工具链
 
 # 仅手动触发
 on:
@@ -25,7 +25,7 @@ on:
 
 jobs:
   # --------------------------
-  # Job 1：依赖准备与缓存（NDK Clang + SukiSU）
+  # Job 1：依赖准备与缓存（AOSP Clang + SukiSU）
   # --------------------------
   prepare-dependencies:
     runs-on: ubuntu-22.04
@@ -42,7 +42,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y git git-lfs wget curl lz4 patch unzip
 
-      # 1. 缓存内核源码
+      # 1. 缓存内核源码（保持不变）
       - name: Cache kernel source
         id: cache-kernel
         uses: actions/cache@v3
@@ -60,7 +60,7 @@ jobs:
           git clone $KERNEL_REPO kernel
           cd kernel && git checkout $KERNEL_BRANCH && git rev-parse HEAD > ../kernel_commit.txt
 
-      # 2. 集成 SukiSU
+      # 2. 集成 SukiSU（保持不变）
       - name: Integrate SukiSU (if build type is with_sukisu)
         if: github.event.inputs.build_type == 'with_sukisu'
         run: |
@@ -76,7 +76,7 @@ jobs:
           fi
           echo "SUKISU_VERSION=$SUKISU_VERSION" >> $GITHUB_ENV
 
-      # 3. 缓存设备树
+      # 3. 缓存设备树（保持不变）
       - name: Cache device trees
         id: cache-device
         uses: actions/cache@v3
@@ -99,24 +99,26 @@ jobs:
           cd device/sony/${DEVICE_CODENAME} && git checkout $KERNEL_BRANCH && cd ../../..
           cd device/sony/sm8550-common && git checkout $KERNEL_BRANCH && cd ../../..
 
-      # 4. 缓存 Android NDK（r26b，适配Android 14）
-      - name: Cache Android NDK (Clang)
-        id: cache-ndk
+      # 4. 新增：缓存 AOSP 预编译 Clang 工具链（替换原 NDK 步骤）
+      - name: Cache AOSP Prebuilt Clang
+        id: cache-aosp-clang
         uses: actions/cache@v3
         with:
-          path: ./android-ndk-r26b
-          key: ndk-r26b-clang-${{ runner.os }}
+          # AOSP Clang 标准路径（clang-r487747c 为 Android 14 常用版本，可按需调整）
+          path: ./prebuilts/clang/host/linux-x86/clang-r487747c
+          key: aosp-clang-r487747c-${{ runner.os }}
           restore-keys: |
-            ndk-r26b-clang-
+            aosp-clang-r487747c-
 
-      - name: Download Android NDK (含Clang)
-        if: steps.cache-ndk.outputs.cache-hit != 'true'
+      - name: Clone AOSP Prebuilt Clang (if not cached)
+        if: steps.cache-aosp-clang.outputs.cache-hit != 'true'
         run: |
-          wget https://dl.google.com/android/repository/android-ndk-r26b-linux.zip -O ndk.zip
-          unzip ndk.zip && rm -f ndk.zip
+          # 克隆 LineageOS 同步的 AOSP 预编译 Clang（比直接从 AOSP 仓库快）
+          mkdir -p prebuilts/clang/host/linux-x86
+          git clone https://github.com/LineageOS/android_prebuilts_clang_host_linux-x86_clang-r487747c.git prebuilts/clang/host/linux-x86/clang-r487747c
 
   # --------------------------
-  # Job 2：NDK Clang编译内核与生成boot.img
+  # Job 2：AOSP Clang 编译内核与生成 boot.img
   # --------------------------
   compile-bootimg:
     runs-on: ubuntu-22.04
@@ -125,13 +127,13 @@ jobs:
       - name: Checkout main repo
         uses: actions/checkout@v4
 
-      - name: Install Clang build dependencies
+      - name: Install AOSP Clang build dependencies（保持不变，依赖通用）
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential ccache flex g++-multilib gcc-multilib lib32ncurses5-dev lib32readline-dev lib32z1-dev libelf-dev liblz4-tool libncurses5-dev libssl-dev lzop rsync zip zlib1g-dev
           sudo apt-get install -y binutils-aarch64-linux-gnu
 
-      # 恢复缓存
+      # 恢复缓存（内核、设备树保持不变，新增 AOSP Clang 恢复）
       - name: Restore kernel source cache
         uses: actions/cache@v3
         with:
@@ -146,64 +148,55 @@ jobs:
             ./device/sony/sm8550-common
           key: device-${{ needs.prepare-dependencies.outputs.device_codename }}-${{ needs.prepare-dependencies.outputs.kernel_branch }}-${{ runner.os }}
 
-      - name: Restore Android NDK (Clang)
+      - name: Restore AOSP Prebuilt Clang
         uses: actions/cache@v3
         with:
-          path: ./android-ndk-r26b
-          key: ndk-r26b-clang-${{ runner.os }}
+          path: ./prebuilts/clang/host/linux-x86/clang-r487747c
+          key: aosp-clang-r487747c-${{ runner.os }}
 
-      # 核心修复：适配NDK r26b工具链命名规则
-      - name: Configure NDK Clang Path (Fixed for r26b)
+      # 核心修改：配置 AOSP Clang 路径（替换原 NDK 路径配置）
+      - name: Configure AOSP Clang Path
         run: |
-          # NDK工具链绝对路径
-          NDK_BIN_PATH=$(pwd)/android-ndk-r26b/toolchains/llvm/prebuilt/linux-x86_64/bin
+          # AOSP Clang 工具链绝对路径（对应缓存的版本目录）
+          AOSP_CLANG_BIN=$(pwd)/prebuilts/clang/host/linux-x86/clang-r487747c/bin
           
-          # 添加到PATH
-          echo "PATH=$NDK_BIN_PATH:$PATH" >> $GITHUB_ENV
+          # 添加到 PATH，确保编译时能找到工具链
+          echo "PATH=$AOSP_CLANG_BIN:$PATH" >> $GITHUB_ENV
+          # 验证工具链是否可访问
+          echo "Clang version:"
+          $AOSP_CLANG_BIN/clang --version
 
-      # 修复NDK目录权限
-      - name: Fix NDK directory permissions
-        run: |
-          # 确保我们对NDK目录有写入权限
-          sudo chmod -R u+w ./android-ndk-r26b/toolchains/llvm/prebuilt/linux-x86_64/bin/
-          
-      # 强制用NDK Clang编译内核（适配工具链命名）
-      - name: Build kernel with NDK Clang (Forced)
+      # 核心修改：用 AOSP Clang 编译内核（适配工具链命名）
+      - name: Build kernel with AOSP Clang
         run: |
           cd kernel
-          # 基础配置
+          # 基础配置（ARCH 保持 arm64）
           export ARCH=arm64
-          # 强制指定Clang工具链（使用带API版本的命令）
-          export CC=aarch64-linux-android34-clang
+          # AOSP Clang 工具链命名（无 NDK 的 API 版本后缀）
+          export CC=aarch64-linux-android-clang
+          export CXX=aarch64-linux-android-clang++
           export LD=ld.lld
           export AR=llvm-ar
           export NM=llvm-nm
           export OBJCOPY=llvm-objcopy
           export OBJDUMP=llvm-objdump
           export STRIP=llvm-strip
-          # 清除干扰变量
+          # 清除干扰变量（避免残留 NDK/其他编译器路径）
           unset GCC CCACHE_COMPILER
 
-          # 使用系统自带的binutils替代NDK的llvm-objdump，解决格式识别问题
-          sudo ln -sf /usr/bin/aarch64-linux-gnu-objdump "$NDK_BIN_PATH/aarch64-linux-android34-objdump"
-          sudo ln -sf /usr/bin/aarch64-linux-gnu-nm "$NDK_BIN_PATH/aarch64-linux-android34-nm"
-          sudo ln -sf /usr/bin/aarch64-linux-gnu-objcopy "$NDK_BIN_PATH/aarch64-linux-android34-objcopy"
-          sudo ln -sf /usr/bin/aarch64-linux-gnu-strip "$NDK_BIN_PATH/aarch64-linux-android34-strip"
-          sudo ln -sf /usr/bin/aarch64-linux-gnu-ar "$NDK_BIN_PATH/aarch64-linux-android34-ar"
+          # 加载设备专属 defconfig（AOSP 工具链直接支持 defconfig 命名）
+          # 注意：需确保内核源码中存在 <设备代号>_defconfig（如 pdx234_defconfig）
+          make O=out defconfig
           
-          # 加载设备专属defconfig（必须带设备代号，修复原defconfig不存在问题）
-          make O=out CC=aarch64-linux-android34-clang LD=ld.lld defconfig
-          
-          # 启用SukiSU配置（适配实际配置项）
+          # 启用 SukiSU 配置（保持不变）
           if [ "${{ needs.prepare-dependencies.outputs.build_type }}" = "with_sukisu" ]; then
-            # 若SukiSU基于KernelSU，配置项为CONFIG_KERNEL_SU
-            make O=out CC=aarch64-linux-android34-clang menuconfig KCONFIG_CONFIG=out/.config -e CONFIG_KERNEL_SU=y CONFIG_KERNEL_SU_MODULES=y
+            make O=out menuconfig KCONFIG_CONFIG=out/.config -e CONFIG_KERNEL_SU=y CONFIG_KERNEL_SU_MODULES=y
           fi
           
-          # 编译
-          make O=out CC=aarch64-linux-android34-clang LD=ld.lld -j$(nproc)
+          # 编译（使用 AOSP 工具链变量）
+          make O=out -j$(nproc)
 
-      # 生成ramdisk
+      # 生成 ramdisk（保持不变）
       - name: Prepare ramdisk
         run: |
           DEVICE_CODENAME="${{ needs.prepare-dependencies.outputs.device_codename }}"
@@ -211,7 +204,7 @@ jobs:
           cp -r device/sony/${DEVICE_CODENAME}/ramdisk/* ramdisk/
           cd ramdisk && find . | cpio -o -H newc | lz4 -l -12 -f - ../ramdisk.img && cd ..
 
-      # 打包boot.img
+      # 打包 boot.img（仅修改产物名称中的工具链标识）
       - name: Build boot.img
         run: |
           DEVICE_CODENAME="${{ needs.prepare-dependencies.outputs.device_codename }}"
@@ -221,10 +214,11 @@ jobs:
           wget https://github.com/osm0sis/mkbootimg/releases/latest/download/mkbootimg -O mkbootimg
           chmod +x mkbootimg
           
+          # 产物名称：将 ndk-clang 改为 aosp-clang
           if [ "$BUILD_TYPE" = "with_sukisu" ]; then
-            OUTPUT_NAME="boot-${DEVICE_CODENAME}-${KERNEL_BRANCH}-ndk-clang-sukisu-v${{ env.SUKISU_VERSION }}.img"
+            OUTPUT_NAME="boot-${DEVICE_CODENAME}-${KERNEL_BRANCH}-aosp-clang-sukisu-v${{ env.SUKISU_VERSION }}.img"
           else
-            OUTPUT_NAME="boot-${DEVICE_CODENAME}-${KERNEL_BRANCH}-ndk-clang-original.img"
+            OUTPUT_NAME="boot-${DEVICE_CODENAME}-${KERNEL_BRANCH}-aosp-clang-original.img"
           fi
           
           ./mkbootimg \
@@ -241,9 +235,9 @@ jobs:
             --ospatchlevel 2025-04 \
             --output $OUTPUT_NAME
 
-      # 上传产物
+      # 上传产物（修改 artifact 名称中的工具链标识）
       - name: Upload boot.img
         uses: actions/upload-artifact@v4
         with:
-          name: boot-image-${{ needs.prepare-dependencies.outputs.device_codename }}-ndk-clang-${{ needs.prepare-dependencies.outputs.build_type }}
+          name: boot-image-${{ needs.prepare-dependencies.outputs.device_codename }}-aosp-clang-${{ needs.prepare-dependencies.outputs.build_type }}
           path: boot-${{ needs.prepare-dependencies.outputs.device_codename }}-*.img
