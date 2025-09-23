@@ -223,8 +223,8 @@ jobs:
           unset GCC CCACHE_COMPILER
 
           # 加载设备专属 defconfig（需内核源码存在 <设备代号>_defconfig）
-          echo "📝 加载 defconfig：${{ needs.prepare-dependencies.outputs.device_codename }}_defconfig"
-          make O=out defconfig ${needs.prepare-dependencies.outputs.device_codename}_defconfig
+          echo "📝 加载 defconfig：defconfig"
+          make O=out defconfig
           
           # 启用 SukiSU 配置（保持不变）
           if [ "${{ needs.prepare-dependencies.outputs.build_type }}" = "with_sukisu" ]; then
