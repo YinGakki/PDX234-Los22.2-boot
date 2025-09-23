@@ -1,4 +1,4 @@
-name: Build Boot Image (AOSP Clang + SukiSU Option)  # 更新名称，明确工具链
+name: Build Boot Image (AOSP Clang Latest + SukiSU Option)  # 明确“最新版”
 
 # 仅手动触发
 on:
@@ -25,7 +25,7 @@ on:
 
 jobs:
   # --------------------------
-  # Job 1：依赖准备与缓存（AOSP Clang + SukiSU）
+  # Job 1：依赖准备与缓存（最新 AOSP Clang + SukiSU）
   # --------------------------
   prepare-dependencies:
     runs-on: ubuntu-22.04
@@ -99,36 +99,50 @@ jobs:
           cd device/sony/${DEVICE_CODENAME} && git checkout $KERNEL_BRANCH && cd ../../..
           cd device/sony/sm8550-common && git checkout $KERNEL_BRANCH && cd ../../..
 
-     # 替换工作流中 “Cache AOSP Prebuilt Clang” 和 “Clone AOSP Prebuilt Clang” 部分
-      - name: Cache AOSP Prebuilt Clang (r547379)
+      # 4. 缓存 AOSP 最新版 Clang（替换固定版本）
+      - name: Cache AOSP Prebuilt Clang (Latest)
         id: cache-aosp-clang
         uses: actions/cache@v3
         with:
-          path: ./prebuilts/clang/host/linux-x86/clang-r547379
-          key: aosp-clang-r547379-${{ runner.os }}
+          # 统一使用 "clang-latest" 目录，避免版本号硬编码
+          path: ./prebuilts/clang/host/linux-x86/clang-latest
+          # 缓存 key 不含版本号，确保每次获取最新
+          key: aosp-clang-latest-${{ runner.os }}
           restore-keys: |
-            aosp-clang-r547379-
+            aosp-clang-latest-
 
-      - name: Clone AOSP Prebuilt Clang (r547379) if not cached
+      # 5. 克隆 AOSP 最新版 Clang（若未缓存）
+      - name: Clone AOSP Prebuilt Clang (Latest) if not cached
         if: steps.cache-aosp-clang.outputs.cache-hit != 'true'
         run: |
+          # 创建基础目录
           mkdir -p prebuilts/clang/host/linux-x86
-          # 克隆 AOSP 仓库的 clang-r547379 目录
-          git clone -n --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/ \
-            --filter=tree:0 \
-            prebuilts/clang/host/linux-x86/clang-r547379
-          cd prebuilts/clang/host/linux-x86/clang-r547379
-          git sparse-checkout set clang-r547379
-          git checkout refs/heads/main
+          
+          # 浅克隆 AOSP 预编译 Clang 仓库（仅最新提交，体积小）
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/ prebuilts/clang/host/linux-x86/temp_clone
+          
+          # 查找最新的 clang-r<数字> 目录（按版本号排序，取最后一个）
+          # 格式示例：clang-r547379、clang-r550300，sort -V 按版本号升序排列
+          LATEST_CLANG_DIR=$(ls -1d prebuilts/clang/host/linux-x86/temp_clone/clang-r* | sort -V | tail -n1)
+          
+          # 重命名为 "clang-latest"，便于后续统一引用
+          mv $LATEST_CLANG_DIR prebuilts/clang/host/linux-x86/clang-latest
+          
+          # 删除临时克隆目录（仅保留最新版，节省空间）
+          rm -rf prebuilts/clang/host/linux-x86/temp_clone
+          
+          # 验证：检查 Clang 可执行文件是否存在
+          echo "✅ 最新 Clang 目录：$LATEST_CLANG_DIR"
+          if [ -f "prebuilts/clang/host/linux-x86/clang-latest/bin/clang" ]; then
+            echo "✅ Clang 工具链获取成功！版本信息："
+            prebuilts/clang/host/linux-x86/clang-latest/bin/clang --version
+          else
+            echo "❌ Clang 工具链缺失！"
+            exit 1  # 终止工作流，提示错误
+          fi
 
-          # 检查 Clang 可执行文件路径
-            ls prebuilts/clang/host/linux-x86/clang-r547379/bin/clang
-      
-          # 查看 Clang 版本（若输出版本信息，说明获取成功）
-          prebuilts/clang/host/linux-x86/clang-r547379/bin/clang --version
-   
   # --------------------------
-  # Job 2：AOSP Clang 编译内核与生成 boot.img
+  # Job 2：用 AOSP 最新 Clang 编译内核与生成 boot.img
   # --------------------------
   compile-bootimg:
     runs-on: ubuntu-22.04
@@ -137,13 +151,13 @@ jobs:
       - name: Checkout main repo
         uses: actions/checkout@v4
 
-      - name: Install AOSP Clang build dependencies（保持不变，依赖通用）
+      - name: Install AOSP Clang build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential ccache flex g++-multilib gcc-multilib lib32ncurses5-dev lib32readline-dev lib32z1-dev libelf-dev liblz4-tool libncurses5-dev libssl-dev lzop rsync zip zlib1g-dev
           sudo apt-get install -y binutils-aarch64-linux-gnu
 
-      # 恢复缓存（内核、设备树保持不变，新增 AOSP Clang 恢复）
+      # 恢复缓存（内核、设备树保持不变，Clang 恢复最新版）
       - name: Restore kernel source cache
         uses: actions/cache@v3
         with:
@@ -158,31 +172,34 @@ jobs:
             ./device/sony/sm8550-common
           key: device-${{ needs.prepare-dependencies.outputs.device_codename }}-${{ needs.prepare-dependencies.outputs.kernel_branch }}-${{ runner.os }}
 
-      - name: Restore AOSP Prebuilt Clang
+      - name: Restore AOSP Prebuilt Clang (Latest)
         uses: actions/cache@v3
         with:
-          path: ./prebuilts/clang/host/linux-x86/clang-r487747c
-          key: aosp-clang-r487747c-${{ runner.os }}
+          path: ./prebuilts/clang/host/linux-x86/clang-latest
+          key: aosp-clang-latest-${{ runner.os }}
 
-      # 核心修改：配置 AOSP Clang 路径（替换原 NDK 路径配置）
-      - name: Configure AOSP Clang Path
+      # 配置 AOSP 最新 Clang 路径（引用统一的 clang-latest 目录）
+      - name: Configure AOSP Clang Path (Latest)
         run: |
-          # AOSP Clang 工具链绝对路径（对应缓存的版本目录）
-          AOSP_CLANG_BIN=$(pwd)/prebuilts/clang/host/linux-x86/clang-r487747c/bin
+          # 工具链绝对路径（基于重命名后的 latest 目录）
+          AOSP_CLANG_BIN=$(pwd)/prebuilts/clang/host/linux-x86/clang-latest/bin
           
-          # 添加到 PATH，确保编译时能找到工具链
+          # 添加到 PATH，确保编译时优先使用该工具链
           echo "PATH=$AOSP_CLANG_BIN:$PATH" >> $GITHUB_ENV
-          # 验证工具链是否可访问
-          echo "Clang version:"
-          $AOSP_CLANG_BIN/clang --version
+          
+          # 再次验证工具链（避免缓存损坏）
+          echo "🔍 当前使用的 Clang 版本："
+          clang --version
+          echo "🔍 当前使用的 ld.lld 版本："
+          ld.lld --version
 
-      # 核心修改：用 AOSP Clang 编译内核（适配工具链命名）
-      - name: Build kernel with AOSP Clang
+      # 用 AOSP 最新 Clang 编译内核（工具链命名适配）
+      - name: Build kernel with AOSP Clang (Latest)
         run: |
           cd kernel
-          # 基础配置（ARCH 保持 arm64）
+          # 基础架构配置
           export ARCH=arm64
-          # AOSP Clang 工具链命名（无 NDK 的 API 版本后缀）
+          # AOSP Clang 标准工具链命名（无版本后缀，自动匹配 latest 目录）
           export CC=aarch64-linux-android-clang
           export CXX=aarch64-linux-android-clang++
           export LD=ld.lld
@@ -191,19 +208,21 @@ jobs:
           export OBJCOPY=llvm-objcopy
           export OBJDUMP=llvm-objdump
           export STRIP=llvm-strip
-          # 清除干扰变量（避免残留 NDK/其他编译器路径）
+          # 清除干扰变量（避免冲突）
           unset GCC CCACHE_COMPILER
 
-          # 加载设备专属 defconfig（AOSP 工具链直接支持 defconfig 命名）
-          # 注意：需确保内核源码中存在 <设备代号>_defconfig（如 pdx234_defconfig）
-          make O=out defconfig
+          # 加载设备专属 defconfig（需内核源码存在 <设备代号>_defconfig）
+          echo "📝 加载 defconfig：${{ needs.prepare-dependencies.outputs.device_codename }}_defconfig"
+          make O=out defconfig ${needs.prepare-dependencies.outputs.device_codename}_defconfig
           
           # 启用 SukiSU 配置（保持不变）
           if [ "${{ needs.prepare-dependencies.outputs.build_type }}" = "with_sukisu" ]; then
+            echo "🔧 启用 SukiSU 配置"
             make O=out menuconfig KCONFIG_CONFIG=out/.config -e CONFIG_KERNEL_SU=y CONFIG_KERNEL_SU_MODULES=y
           fi
           
-          # 编译（使用 AOSP 工具链变量）
+          # 多核编译（利用 GitHub Actions 全部核心）
+          echo "🚀 开始编译内核，线程数：$(nproc)"
           make O=out -j$(nproc)
 
       # 生成 ramdisk（保持不变）
@@ -213,24 +232,27 @@ jobs:
           mkdir -p ramdisk
           cp -r device/sony/${DEVICE_CODENAME}/ramdisk/* ramdisk/
           cd ramdisk && find . | cpio -o -H newc | lz4 -l -12 -f - ../ramdisk.img && cd ..
+          echo "✅ ramdisk.img 生成完成"
 
-      # 打包 boot.img（仅修改产物名称中的工具链标识）
+      # 打包 boot.img（产物名称含“latest-clang”标识）
       - name: Build boot.img
         run: |
           DEVICE_CODENAME="${{ needs.prepare-dependencies.outputs.device_codename }}"
           KERNEL_BRANCH="${{ needs.prepare-dependencies.outputs.kernel_branch }}"
           BUILD_TYPE="${{ needs.prepare-dependencies.outputs.build_type }}"
           
+          # 下载最新版 mkbootimg 工具
           wget https://github.com/osm0sis/mkbootimg/releases/latest/download/mkbootimg -O mkbootimg
           chmod +x mkbootimg
           
-          # 产物名称：将 ndk-clang 改为 aosp-clang
+          # 产物名称：添加“latest-clang”标识，区分固定版本
           if [ "$BUILD_TYPE" = "with_sukisu" ]; then
-            OUTPUT_NAME="boot-${DEVICE_CODENAME}-${KERNEL_BRANCH}-aosp-clang-sukisu-v${{ env.SUKISU_VERSION }}.img"
+            OUTPUT_NAME="boot-${DEVICE_CODENAME}-${KERNEL_BRANCH}-aosp-latest-clang-sukisu-v${{ env.SUKISU_VERSION }}.img"
           else
-            OUTPUT_NAME="boot-${DEVICE_CODENAME}-${KERNEL_BRANCH}-aosp-clang-original.img"
+            OUTPUT_NAME="boot-${DEVICE_CODENAME}-${KERNEL_BRANCH}-aosp-latest-clang-original.img"
           fi
           
+          # 打包 boot.img（参数保持原配置）
           ./mkbootimg \
             --kernel kernel/out/arch/arm64/boot/Image.gz-dtb \
             --ramdisk ramdisk.img \
@@ -244,10 +266,13 @@ jobs:
             --osversion 14 \
             --ospatchlevel 2025-04 \
             --output $OUTPUT_NAME
+          
+          echo "✅ boot.img 生成完成：$OUTPUT_NAME"
+          ls -lh $OUTPUT_NAME  # 显示产物大小，验证是否生成
 
-      # 上传产物（修改 artifact 名称中的工具链标识）
+      # 上传产物（名称含“latest-clang”）
       - name: Upload boot.img
         uses: actions/upload-artifact@v4
         with:
-          name: boot-image-${{ needs.prepare-dependencies.outputs.device_codename }}-aosp-clang-${{ needs.prepare-dependencies.outputs.build_type }}
+          name: boot-image-${{ needs.prepare-dependencies.outputs.device_codename }}-aosp-latest-clang-${{ needs.prepare-dependencies.outputs.build_type }}
           path: boot-${{ needs.prepare-dependencies.outputs.device_codename }}-*.img
