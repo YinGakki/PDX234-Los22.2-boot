@@ -99,24 +99,34 @@ jobs:
           cd device/sony/${DEVICE_CODENAME} && git checkout $KERNEL_BRANCH && cd ../../..
           cd device/sony/sm8550-common && git checkout $KERNEL_BRANCH && cd ../../..
 
-      # 4. 新增：缓存 AOSP 预编译 Clang 工具链（替换原 NDK 步骤）
-      - name: Cache AOSP Prebuilt Clang
+     # 替换工作流中 “Cache AOSP Prebuilt Clang” 和 “Clone AOSP Prebuilt Clang” 部分
+      - name: Cache AOSP Prebuilt Clang (r547379)
         id: cache-aosp-clang
         uses: actions/cache@v3
         with:
-          # AOSP Clang 标准路径（clang-r487747c 为 Android 14 常用版本，可按需调整）
-          path: ./prebuilts/clang/host/linux-x86/clang-r487747c
-          key: aosp-clang-r487747c-${{ runner.os }}
+          path: ./prebuilts/clang/host/linux-x86/clang-r547379
+          key: aosp-clang-r547379-${{ runner.os }}
           restore-keys: |
-            aosp-clang-r487747c-
+            aosp-clang-r547379-
 
-      - name: Clone AOSP Prebuilt Clang (if not cached)
+      - name: Clone AOSP Prebuilt Clang (r547379) if not cached
         if: steps.cache-aosp-clang.outputs.cache-hit != 'true'
         run: |
-          # 克隆 LineageOS 同步的 AOSP 预编译 Clang（比直接从 AOSP 仓库快）
           mkdir -p prebuilts/clang/host/linux-x86
-          git clone https://github.com/LineageOS/android_prebuilts_clang_host_linux-x86_clang-r487747c.git prebuilts/clang/host/linux-x86/clang-r487747c
+          # 克隆 AOSP 仓库的 clang-r547379 目录
+          git clone -n --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/ \
+            --filter=tree:0 \
+            prebuilts/clang/host/linux-x86/clang-r547379
+          cd prebuilts/clang/host/linux-x86/clang-r547379
+          git sparse-checkout set clang-r547379
+          git checkout refs/heads/main
 
+          # 检查 Clang 可执行文件路径
+            ls prebuilts/clang/host/linux-x86/clang-r547379/bin/clang
+      
+          # 查看 Clang 版本（若输出版本信息，说明获取成功）
+          prebuilts/clang/host/linux-x86/clang-r547379/bin/clang --version
+   
   # --------------------------
   # Job 2：AOSP Clang 编译内核与生成 boot.img
   # --------------------------
